@@ -56,6 +56,7 @@ import AVFoundation
     @Published var provisionalWarning: String?
     private let provisional = ProvisionalTranscriptionService()
     private let streamingSpeech = StreamingSpeechService()
+    private var fastDictationStartupFailure: (error: Error, useLocalWhisper: Bool)?
     let localWhisper = LocalWhisperLiveService()
     private let modelReadinessOverlay = ModelReadinessOverlay()
     private let transcriptCopyOverlay = TranscriptCopyOverlay()
@@ -366,27 +367,36 @@ import AVFoundation
         transcriptCopyOverlay.hide()
         commandRecording = asCommand
         pendingWorkflow = nil
-        let translateMeeting = asMeeting && library.settings.meetingLiveTranslation
-        if translateMeeting {
-            guard meetingTranslation.isPrepared(source: library.settings.meetingTranslationFrom, target: library.settings.meetingTranslationTo) else {
-                error = "Choose From and To in Meetings, then click Prepare languages before recording with live translation."
-                return
+        let translationRequested = asMeeting && library.settings.meetingLiveTranslation
+        var translationPreparationIssue: String?
+        if translationRequested && meetingTranslation.engine == .ollama {
+            do {
+                try meetingTranslation.prepareOllama(source: library.settings.meetingTranslationFrom,
+                    target: library.settings.meetingTranslationTo)
+            } catch {
+                translationPreparationIssue = error.localizedDescription
             }
         }
+        let translateMeeting = translationRequested && meetingTranslation.isPrepared(
+            source: library.settings.meetingTranslationFrom, target: library.settings.meetingTranslationTo)
         stopPlayback()
         if asCommand { desktop.clearContext() } else { desktop.captureTarget(settings: library.settings) }
         meeting = asMeeting
         recordingTitle = asMeeting ? title : nil
         let matched: DictationMode? = asCommand ? nil : library.modes.first { ModeContextMatcher.matches(mode: $0, bundleID: desktop.targetBundleID, siteHost: desktop.targetSiteHost) }
         recordingMode = modeOverride ?? matched ?? selectedMode
-        if translateMeeting { recordingMode?.language = library.settings.meetingTranslationFrom }
+        if translateMeeting {
+            let sourceLanguage = library.settings.meetingTranslationFrom
+            recordingMode?.language = Locale.Language(identifier: sourceLanguage).languageCode?.identifier ?? sourceLanguage
+        }
         let source = library.settings.meetingSource
         fastDictationActive = !asCommand && !asMeeting && library.settings.fastOnDeviceDictation
         let fastDictation = fastDictationActive
-        let localLive = !asCommand && ((fastDictation && library.settings.fastDictationEngine == "local") || (asMeeting && (translateMeeting || library.settings.liveCaptions) && library.settings.liveCaptionEngine == "local"))
-        localWhisperActive = localLive
         let captionsEnabled = !asCommand && (fastDictation || translateMeeting || library.settings.liveCaptions)
-        let captionEngine = localLive ? "local" : (fastDictation || translateMeeting ? "apple" : library.settings.liveCaptionEngine)
+        let captionEngine = fastDictation ? (library.settings.fastDictationEngine == "local" ? "local" : "apple") :
+            translateMeeting ? library.settings.meetingTranslationCaptionEngine : library.settings.liveCaptionEngine
+        let localLive = captionsEnabled && (fastDictation || asMeeting) && captionEngine == "local"
+        localWhisperActive = localLive
         let operationID = UUID()
         captureID = operationID
         isStarting = true
@@ -398,18 +408,29 @@ import AVFoundation
             }
             do {
                 try Task.checkCancellation()
-                if translateMeeting { try meetingTranslation.beginCapture(settings: library.settings) }
                 provisionalText = ""; provisionalWarning = nil
+                fastDictationStartupFailure = nil
+                var translationIssue: String?
                 if localLive {
-                    guard LocalWhisperRuntime.available(model: library.settings.localModel) else { throw AppError.message("Choose an installed local GGML model and bundled live helper before using local live dictation. No Apple or cloud fallback was used.") }
-                    let mode = recordingMode ?? selectedMode
-                    let language = mode.language == "auto" ? library.settings.language : mode.language
-                    try await localWhisper.start(model: library.settings.localModel, language: language,
-                        snapshot: { [weak self] in
-                            guard let self else { throw CancellationError() }
-                            if asMeeting { return try await self.meetingRecorder.liveWhisperSnapshot() }
-                            return try self.recorder.liveWhisperSnapshot()
-                        }, onUpdate: { [weak self] in self?.provisionalText = $0 }, onError: { [weak self] in self?.provisionalWarning = $0 })
+                    do {
+                        guard LocalWhisperRuntime.available(model: library.settings.localModel) else { throw AppError.message("Choose an installed local GGML model and live Whisper helper in Models to use local live captions.") }
+                        let mode = recordingMode ?? selectedMode
+                        let language = mode.language == "auto" ? library.settings.language : mode.language
+                        try await localWhisper.start(model: library.settings.localModel, language: language,
+                            updateInterval: translateMeeting ? .milliseconds(850) : .milliseconds(1500),
+                            snapshot: { [weak self] in
+                                guard let self else { throw CancellationError() }
+                                if asMeeting { return try await self.meetingRecorder.liveWhisperSnapshot() }
+                                return try self.recorder.liveWhisperSnapshot()
+                            }, onUpdate: { [weak self] in self?.provisionalText = $0 }, onError: { [weak self] in self?.provisionalWarning = $0 })
+                    } catch is CancellationError { throw CancellationError() }
+                    catch {
+                        if fastDictation { fastDictationStartupFailure = (error, true) }
+                        localWhisper.stopSession()
+                        localWhisperActive = false
+                        provisionalWarning = error.localizedDescription
+                        if translateMeeting { translationIssue = error.localizedDescription }
+                    }
                 } else if captionsEnabled && captionEngine == "apple" {
                     let mode = recordingMode ?? selectedMode
                     let language = mode.language == "auto" ? library.settings.language : mode.language
@@ -427,8 +448,9 @@ import AVFoundation
                         } else { recorder.liveBufferHandler = streamingSpeech.audioSink(source: .microphone) }
                     } catch is CancellationError { throw CancellationError() }
                     catch {
-                        if fastDictation || translateMeeting { throw error }
+                        if fastDictation { fastDictationStartupFailure = (error, false) }
                         provisionalWarning = error.localizedDescription
+                        if translateMeeting { translationIssue = error.localizedDescription }
                     }
                 } else if captionsEnabled && captionEngine != "provider" {
                     provisionalWarning = "Unknown live-caption engine. Choose Apple on-device streaming or selected-provider previews in Configuration."
@@ -436,6 +458,17 @@ import AVFoundation
                 try Task.checkCancellation()
                 if asMeeting { try await meetingRecorder.start(source: source, deviceUID: library.settings.inputDeviceUID) } else { try await recorder.start(deviceUID: library.settings.inputDeviceUID) }
                 try Task.checkCancellation()
+                if translationRequested {
+                    if let translationIssue {
+                        meetingTranslation.skipCapture(reason: translationIssue)
+                    } else if translateMeeting {
+                        do { try meetingTranslation.beginCapture(settings: library.settings) }
+                        catch { meetingTranslation.skipCapture(reason: error.localizedDescription) }
+                    } else {
+                        meetingTranslation.skipCapture(reason: translationPreparationIssue ?? meetingTranslation.error ??
+                            "Choose From and To, then prepare the languages before recording.")
+                    }
+                }
                 captureSoundFeedback = library.settings.soundFeedback
                 soundControl.start(feedback: captureSoundFeedback, duckOutput: library.settings.duckOutput)
                 soundWarning = soundControl.lastWarning
@@ -478,7 +511,9 @@ import AVFoundation
     }
 
     private var recordingOverlayText: String {
-        guard fastDictationActive, !provisionalText.isEmpty else { return status }
+        guard !provisionalText.isEmpty, !meeting, !commandRecording else {
+            return fastDictationStartupFailure == nil ? status : "Recording · live transcription unavailable"
+        }
         let limit = library.settings.effectiveRecordingOverlayStyle == .mini ? 60 : 140
         return String(provisionalText.replacingOccurrences(of: "\n", with: " ").suffix(limit))
     }
@@ -499,6 +534,9 @@ import AVFoundation
         activityRevision = UUID()
         let fastDictation = fastDictationActive
         let localLive = localWhisperActive
+        let startupFailure = fastDictationStartupFailure
+        let useLocalWhisper = localLive || startupFailure?.useLocalWhisper == true
+        fastDictationStartupFailure = nil
         if fastDictation { provisional.stop() } else { stopCaptionServices() }
         holdRecordingOwnership.clear()
         timer?.invalidate(); timer = nil
@@ -551,6 +589,7 @@ import AVFoundation
                     status = "Finalizing on-device dictation…"
                     let raw: String?
                     do {
+                        if let startupFailure { throw startupFailure.error }
                         if localLive {
                             guard let finalLiveSnapshot else { throw AppError.message("The final local audio window was unavailable.") }
                             raw = try await localWhisper.finish(finalLiveSnapshot)
@@ -564,7 +603,7 @@ import AVFoundation
                     } catch {
                         try Task.checkCancellation()
                         guard !isTerminating,
-                              localLive || FastDictationRecovery.canUseSelectedLocalModel(settings: library.settings, mode: mode) else { throw error }
+                              useLocalWhisper || FastDictationRecovery.canUseSelectedLocalModel(settings: library.settings, mode: mode) else { throw error }
                         // Keep the real full recording as the source of truth.
                         // Never promote Apple's incomplete preview into final text.
                         raw = nil
@@ -573,7 +612,7 @@ import AVFoundation
                     try Task.checkCancellation()
                     guard !isTerminating else { return }
                     isStarting = false
-                    process(URL(fileURLWithPath: pendingPath), duration: duration, mode: mode, owned: true, replacing: pending.id, stableRaw: raw, forceLocalSpeech: localLive)
+                    process(URL(fileURLWithPath: pendingPath), duration: duration, mode: mode, owned: true, replacing: pending.id, stableRaw: raw, forceLocalSpeech: useLocalWhisper)
                     if raw == nil {
                         status = "Finishing with local Whisper — live recognition was incomplete…"
                         if library.settings.effectiveRecordingOverlayStyle != .none {
@@ -703,6 +742,7 @@ import AVFoundation
         processingTask = Task {
             var savedEntryID = entryID
             var hasRecognizedText = entryID.flatMap { id in library.history.first { $0.id == id } }.map { !$0.raw.isEmpty } ?? false
+            var recognizedOutput: String?
             var audioURL = url
             var durableAudio = false
             defer {
@@ -791,6 +831,7 @@ import AVFoundation
                     library.history[0].segments = result.segments
                 }
                 hasRecognizedText = true
+                recognizedOutput = output
                 latestText = output
                 guard saveHistory() else { throw AppError.message("Recognized text is available, but saving History failed. Copy the text before quitting.") }
                 if stableRaw != nil && !mode.processingInstruction.isEmpty {
@@ -838,18 +879,17 @@ import AVFoundation
                 if !settings.retainAudio { removeManagedAudioIfUnreferenced(audioURL) }
                 pruneRetainedAudio()
                 status = !instruction.isEmpty && providers.rewriteModel.isEmpty ? "Transcript ready · set a formatting model to use \(isMeeting ? "meeting notes" : mode.name)" : "Transcript ready"
-                // Imported files and retries are reviewed in the app before copying.
-                if settings.autoPaste && mode.autoPaste && !isMeeting && owned {
-                    if desktop.hasCapturedEditableField {
+                // Imported files, retries, and meetings are reviewed in the app.
+                if owned && !isMeeting {
+                    if settings.autoPaste && mode.autoPaste {
                         do { try await desktop.paste(output) }
                         catch let issue as DesktopIntegration.IntegrationError {
                             status = "Transcript saved · " + issue.localizedDescription
-                            transcriptCopyOverlay.show(text: output)
                         }
-                    } else {
-                        status = "Transcript saved · no editable field was focused at Stop"
-                        transcriptCopyOverlay.show(text: output)
                     }
+                    try Task.checkCancellation()
+                    overlay.hide()
+                    if desktopEnabled { transcriptCopyOverlay.show(text: output) }
                 }
             } catch {
                 if Task.isCancelled || error is CancellationError {
@@ -871,6 +911,10 @@ import AVFoundation
                 }
                 self.error = error.localizedDescription + textNotice + audioNotice
                 status = "Needs attention"
+                if let recognizedOutput, owned, !isMeeting, desktopEnabled {
+                    overlay.hide()
+                    transcriptCopyOverlay.show(text: recognizedOutput)
+                }
             }
         }
     }
@@ -892,9 +936,19 @@ import AVFoundation
         overlay.hide(); status = "Ready when you are"
     }
 
-    private func removeManagedAudioIfUnreferenced(_ url: URL) {
-        guard isManagedRecording(url), !library.history.contains(where: { $0.audioPath == url.path }) else { return }
-        do { try FileManager.default.removeItem(at: url); recordingStorage.forget(url) } catch { }
+    private func removeManagedAudioIfUnreferenced(_ url: URL, reportFailure: Bool = false) {
+        let path = url.standardizedFileURL.path
+        guard isManagedRecording(url), !library.history.contains(where: {
+            $0.audioPath.map { URL(fileURLWithPath: $0).standardizedFileURL.path } == path
+        }) else { return }
+        do {
+            try FileManager.default.removeItem(at: url)
+            recordingStorage.forget(url)
+        } catch let issue as CocoaError where issue.code == .fileNoSuchFile {
+            recordingStorage.forget(url)
+        } catch {
+            if reportFailure { self.error = "Could not delete saved audio: \(error.localizedDescription)" }
+        }
     }
 
     func chooseMeetingRecordingsFolder() {
@@ -944,12 +998,12 @@ import AVFoundation
     }
 
     func deleteTranscript(_ entry: Transcript) {
-        guard !busy else { return }
+        guard !busy, let current = library.history.first(where: { $0.id == entry.id }) else { return }
         stopPlayback()
         let previous = library.history
-        library.history.removeAll { $0.id == entry.id }
+        library.history.removeAll { $0.id == current.id }
         guard saveHistory() else { library.history = previous; return }
-        if let path = entry.audioPath { removeManagedAudioIfUnreferenced(URL(fileURLWithPath: path)) }
+        if let path = current.audioPath { removeManagedAudioIfUnreferenced(URL(fileURLWithPath: path), reportFailure: true) }
     }
 
     func clearHistory() {
@@ -959,7 +1013,7 @@ import AVFoundation
         library.history = []
         guard saveHistory() else { library.history = entries; return }
         for entry in entries {
-            if let path = entry.audioPath { removeManagedAudioIfUnreferenced(URL(fileURLWithPath: path)) }
+            if let path = entry.audioPath { removeManagedAudioIfUnreferenced(URL(fileURLWithPath: path), reportFailure: true) }
         }
     }
 
@@ -1155,7 +1209,7 @@ import AVFoundation
         var draft = library, saved = lastSavedLibrary
         draft.history = []; saved.history = []
         guard try draftEncoder.encode(draft) == draftEncoder.encode(saved) else { throw AppError.message("Save your local configuration edits before applying shared configuration. Automatic sync will retry after Save.") }
-        if let conflict = HotKeySpec.validationError(toggle: configuration.settings.toggleShortcut, hold: configuration.settings.holdShortcut, modes: configuration.modes, switcher: configuration.settings.modeSwitcherShortcut, workflow: configuration.settings.workflowShortcut) { throw AppError.message(conflict) }
+        if let conflict = HotKeySpec.validationError(toggle: configuration.settings.toggleShortcut, hold: configuration.settings.holdShortcut, modes: configuration.modes, switcher: configuration.settings.modeSwitcherShortcut, workflow: configuration.settings.workflowShortcut, cancel: configuration.settings.cancelShortcut) { throw AppError.message(conflict) }
         guard !configuration.modes.isEmpty else { throw AppError.message("The configuration has no modes.") }
         guard Set(configuration.modes.map(\.id)).count == configuration.modes.count,
               Set(configuration.connections.map(\.id)).count == configuration.connections.count else { throw AppError.message("The configuration contains duplicate mode or provider identities.") }
@@ -1173,7 +1227,7 @@ import AVFoundation
     }
 
     func applySettings() {
-        if let conflict = HotKeySpec.validationError(toggle: library.settings.toggleShortcut, hold: library.settings.holdShortcut, modes: library.modes, switcher: library.settings.modeSwitcherShortcut, workflow: library.settings.workflowShortcut) { error = conflict; return }
+        if let conflict = HotKeySpec.validationError(toggle: library.settings.toggleShortcut, hold: library.settings.holdShortcut, modes: library.modes, switcher: library.settings.modeSwitcherShortcut, workflow: library.settings.workflowShortcut, cancel: library.settings.cancelShortcut) { error = conflict; return }
         guard save() else { return }
         updateAutomation()
         if desktop.configure(settings: library.settings, modes: library.modes) { pruneRetainedAudio(); status = "Settings saved" }

@@ -61,6 +61,6 @@
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>Cortala captures system audio when you explicitly start a meeting recording.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>When you enable Apple on-device live captions and start recording, Cortala uses Speech Recognition to show provisional text. No cloud Speech fallback is used.</string>
+	<string>Cortala uses Apple Speech on this Mac for live captions and final dictation when you choose the Apple Speech engine.</string>
 </dict>
 </plist>

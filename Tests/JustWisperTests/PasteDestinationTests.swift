@@ -3,6 +3,14 @@ import Testing
 @testable import JustWisper
 
 struct PasteDestinationTests {
+    @Test func keyboardEditableFieldsDoNotRequireWritableValue() {
+        #expect(PasteFieldPolicy.allows(role: "AXTextArea", secure: false, enabled: true, editable: nil, valueSettable: false, hasSelectionRange: true))
+        #expect(!PasteFieldPolicy.allows(role: "AXTextArea", secure: false, enabled: true, editable: false, valueSettable: false, hasSelectionRange: true))
+        #expect(!PasteFieldPolicy.allows(role: "AXTextField", secure: true, enabled: true, editable: true, valueSettable: true, hasSelectionRange: true))
+        #expect(!PasteFieldPolicy.allows(role: "AXTextField", secure: false, enabled: false, editable: true, valueSettable: true, hasSelectionRange: true))
+        #expect(!PasteFieldPolicy.allows(role: "AXStaticText", secure: false, enabled: true, editable: nil, valueSettable: false, hasSelectionRange: true))
+    }
+
     private var field: PasteDestinationFingerprint {
         .init(role: "AXTextArea", identifier: "composer", placeholder: nil, contentDigest: "digest", selection: NSRange(location: 0, length: 0), frame: CGRect(x: 10, y: 20, width: 300, height: 100))
     }

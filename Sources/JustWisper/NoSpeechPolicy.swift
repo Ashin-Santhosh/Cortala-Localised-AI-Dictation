@@ -38,3 +38,17 @@ enum NoSpeechPolicy {
         }.value
     }
 }
+
+/// Lift quiet PCM for recognition while preserving loud input and digital silence.
+enum QuietSpeechGain {
+    static func apply(to samples: UnsafeMutableBufferPointer<Float>) {
+        var peak: Float = 0
+        for sample in samples {
+            guard sample.isFinite else { return }
+            peak = max(peak, abs(sample))
+        }
+        guard peak >= 0.001, peak < 0.15 else { return }
+        let gain = min(4, 0.15 / peak)
+        for index in samples.indices { samples[index] *= gain }
+    }
+}

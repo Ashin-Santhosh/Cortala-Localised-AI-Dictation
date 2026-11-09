@@ -1,5 +1,5 @@
 #!/bin/bash
-# Experimental, ad-hoc signed direct download. Does not notarize or upload.
+# Experimental direct download. Does not notarize or upload.
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -20,7 +20,7 @@ output.write_text(f'''Cortala — experimental evaluation build
 Requires an Apple Silicon Mac running macOS {info['LSMinimumSystemVersion']} or later.
 Drag Cortala to Applications before opening it.
 
-This build is ad-hoc signed and has NOT been notarized by Apple. macOS may
+This build has NOT been notarized by Apple. macOS may
 block the first launch. Review Apple's current guidance for apps from
 unidentified developers: https://support.apple.com/102445
 Do not disable Gatekeeper globally or ignore malware/damaged-app alerts.

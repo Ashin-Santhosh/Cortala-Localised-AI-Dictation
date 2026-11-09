@@ -174,7 +174,7 @@ for source in mapping:
     'This distribution includes whisper.cpp and GGML under their accompanying licenses.\n'
     'Dynamic library install names, search paths, and the Homebrew-specific plugin directory were adjusted for relocation.\n'
     'Model weights are not included. Download and verify them using the app.\n'
-    'This build is ad hoc signed. It is not Apple Developer ID signed or notarized.\n'
+    'The bundled speech runtime payloads are ad hoc signed.\n'
 )
 for destination in mapping.values():
     unresolved = [value for value in dependencies(destination) if value.startswith('/') and not is_system(value)]

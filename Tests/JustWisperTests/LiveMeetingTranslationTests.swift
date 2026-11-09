@@ -28,6 +28,14 @@ struct LiveMeetingTranslationTests {
         queue.receive(String(repeating: "long words ", count: 1000))
         #expect(queue.latest.count <= 480)
     }
+    @Test func growingCaptionDoesNotRetranslateCompletedSentences() {
+        var queue = TranslationCaptionQueue()
+        let now = Date()
+        queue.receive("Das Meeting beginnt. Wir besprechen den Plan.")
+        #expect(queue.take(now: now, minimumInterval: 0.3) == "Wir besprechen den Plan.")
+        queue.receive("Das Meeting beginnt. Wir besprechen den Plan. Danach folgen Fragen.")
+        #expect(queue.take(now: now.addingTimeInterval(0.35), minimumInterval: 0.3) == "Danach folgen Fragen.")
+    }
     @Test @MainActor func oldSessionCannotPublishAfterLanguageChange() async throws {
         let service = LiveMeetingTranslation(engine: .apple)
         service.prepare(source: "en", target: "de")

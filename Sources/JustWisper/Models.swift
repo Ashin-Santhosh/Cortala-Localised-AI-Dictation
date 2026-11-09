@@ -98,6 +98,7 @@ struct AppSettings: Codable {
     var autoPaste = true
     var showOverlay = true
     var launchAtLogin = false
+    var cancelShortcut = HotKeySpec.cancel
     var toggleShortcut = HotKeySpec.toggle
     var holdShortcut = HotKeySpec.hold
     var workflowShortcut = HotKeySpec.workflow
@@ -112,22 +113,24 @@ struct AppSettings: Codable {
     var meetingTemplate = "summary"
     var meetingSource: MeetingAudioSource = .mixed
     var meetingLiveTranslation = false
+    var meetingTranslationCaptionEngine = "local"
     var meetingTranslationFrom = "en"
     var meetingTranslationTo = "de"
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case meetingLiveTranslation, meetingTranslationFrom, meetingTranslationTo
+        case meetingLiveTranslation, meetingTranslationCaptionEngine, meetingTranslationFrom, meetingTranslationTo
         case fastDictationEngine, warmLocalWhisper, fastOnDeviceDictation, speechProvider, speechEndpoint, speechModel, localExecutable, localModel, inputDeviceUID, liveCaptions, liveCaptionEngine, enableSpeakerSeparation, automationEnabled, configSyncFolder, appearance, soundFeedback, duckOutput, learnCorrections, autoSyncConfiguration
         case rewriteEndpoint, rewriteModel, language, retainAudio, retentionDays
-        case workflowShortcut, autoPaste, showOverlay, modeSwitcherShortcut, mouseRecordingButton, mouseRecordingBehavior, captureRecentClipboard, recordingOverlayStyle, launchAtLogin, meetingSource, toggleShortcut, holdShortcut, captureFocusedText, captureSelectedText, meetingTemplate
+        case cancelShortcut, workflowShortcut, autoPaste, showOverlay, modeSwitcherShortcut, mouseRecordingButton, mouseRecordingBehavior, captureRecentClipboard, recordingOverlayStyle, launchAtLogin, meetingSource, toggleShortcut, holdShortcut, captureFocusedText, captureSelectedText, meetingTemplate
     }
 
     init(from decoder: Decoder) throws {
         self.init()
         let values = try decoder.container(keyedBy: CodingKeys.self)
         meetingLiveTranslation = try values.decodeIfPresent(Bool.self, forKey: .meetingLiveTranslation) ?? false
+        meetingTranslationCaptionEngine = try values.decodeIfPresent(String.self, forKey: .meetingTranslationCaptionEngine) ?? meetingTranslationCaptionEngine
         meetingTranslationFrom = try values.decodeIfPresent(String.self, forKey: .meetingTranslationFrom) ?? "en"
         meetingTranslationTo = try values.decodeIfPresent(String.self, forKey: .meetingTranslationTo) ?? "de"
         learnCorrections = try values.decodeIfPresent(Bool.self, forKey: .learnCorrections) ?? learnCorrections
@@ -165,6 +168,7 @@ struct AppSettings: Codable {
         mouseRecordingBehavior = try values.decodeIfPresent(MouseRecordingBehavior.self, forKey: .mouseRecordingBehavior) ?? mouseRecordingBehavior
         captureRecentClipboard = try values.decodeIfPresent(Bool.self, forKey: .captureRecentClipboard) ?? captureRecentClipboard
         launchAtLogin = try values.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? launchAtLogin
+        cancelShortcut = try values.decodeIfPresent(HotKeySpec.self, forKey: .cancelShortcut) ?? cancelShortcut
         toggleShortcut = try values.decodeIfPresent(HotKeySpec.self, forKey: .toggleShortcut) ?? toggleShortcut
         workflowShortcut = try values.decodeIfPresent(HotKeySpec.self, forKey: .workflowShortcut) ?? workflowShortcut
         holdShortcut = try values.decodeIfPresent(HotKeySpec.self, forKey: .holdShortcut) ?? holdShortcut

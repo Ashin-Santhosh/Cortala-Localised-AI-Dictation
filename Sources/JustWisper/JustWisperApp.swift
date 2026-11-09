@@ -29,7 +29,7 @@ import Carbon
             CommandGroup(after: .newItem) { Button("Import audio or video…") { store.importAudio() }.keyboardShortcut("o").disabled(store.busy) }
             CommandMenu("Dictation") {
                 Button(store.isRecording ? "Stop recording" : "Start recording") { store.toggleRecording() }.keyboardShortcut("r", modifiers: [.command, .shift]).disabled(store.isStarting || store.isProcessing)
-                Button("Cancel") { store.cancel() }.keyboardShortcut(.escape, modifiers: [])
+                Button("Cancel") { store.cancel() }
             }
             CommandGroup(replacing: .help) { Button("Cortala Help & Tutorial") { store.page = .help } }
         }
@@ -138,6 +138,7 @@ struct Panel<Content: View>: View {
 struct HomeView: View {
     @EnvironmentObject var store: AppStore
     @State private var search = ""
+    @State private var canAutoPaste = false
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             Panel {
@@ -147,13 +148,18 @@ struct HomeView: View {
                 }
                 DictationSpeedPicker()
                 HStack(alignment: .top, spacing: 12) {
-                    Button {
-                        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
-                    } label: {
-                        Label("Enable Accessibility for auto-paste…", systemImage: "hand.point.up.left.fill")
+                    Label {
+                        Text(canAutoPaste ? "Accessibility allowed" : "Accessibility required for auto-paste")
+                    } icon: {
+                        Image(systemName: "circle.fill").foregroundStyle(canAutoPaste ? .green : .red)
                     }
-                    Text("In System Settings, enable Cortala from your Applications folder. Then place your cursor in another app and use the recording shortcut.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    if !canAutoPaste {
+                        Button("Open Accessibility settings") { SetupDestination.open("Accessibility") }
+                    }
+                }
+                .task { canAutoPaste = store.desktop.canAutoPaste }
+                .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+                    canAutoPaste = store.desktop.canAutoPaste
                 }
                 HStack {
                     Picker("Mode", selection: Binding(get: { store.selectedMode.id }, set: { _ = store.chooseMode($0) })) { ForEach(store.library.modes) { Text($0.name).tag($0.id) } }.frame(maxWidth: 270).disabled(store.busy)
@@ -217,7 +223,8 @@ struct ProvisionalCaptionsView: View {
         Panel {
             Text(store.fastDictationActive ? "Live dictation · provisional words" : "Provisional captions · recent audio").font(.headline)
             Text(store.provisionalText.isEmpty ? "Waiting for speech…" : store.provisionalText).textSelection(.enabled)
-            Text(store.localWhisperActive ? "Local Whisper revises recent speech on this Mac. Words can change until Stop; the final audio tail is decoded locally, with full saved-audio recovery if needed. Long sessions show only recent provisional text. No provisional words are pasted." : store.fastDictationActive ? "Apple Speech updates words on this Mac as you speak. Stop finalizes this on-device transcript, then applies any configured formatting for your mode. Live words can change and are never pasted while recording." : store.library.settings.liveCaptionEngine == "apple" ? "Apple Speech updates incremental hypotheses on this Mac. Microphone/System audio labels identify inputs, not people. Final transcription uses your selected full-recording model after Stop. Captions are never pasted." : "A rolling audio window refreshes about every six seconds. Final transcription uses the full recording after Stop. Previews are never pasted.").font(.caption).foregroundStyle(.secondary)
+            Text(store.localWhisperActive ? "Local Whisper revises recent speech on this Mac. Words can change until Stop; the final audio tail is decoded locally, with full saved-audio recovery if needed. Long sessions show only recent provisional text. No provisional words are pasted." : store.fastDictationActive ? "Apple Speech updates words on this Mac as you speak. Stop finalizes this on-device transcript, then applies any configured formatting for your mode. Live words can change and are never pasted while recording." : (store.library.settings.meetingLiveTranslation && store.page == .meetings ?
+                store.library.settings.meetingTranslationCaptionEngine : store.library.settings.liveCaptionEngine) == "apple" ? "Apple Speech updates incremental hypotheses on this Mac. Microphone/System audio labels identify inputs, not people. Final transcription uses your selected full-recording model after Stop. Captions are never pasted." : "A rolling audio window refreshes about every six seconds. Final transcription uses the full recording after Stop. Previews are never pasted.").font(.caption).foregroundStyle(.secondary)
             if let warning = store.provisionalWarning { Text(warning).font(.caption).foregroundStyle(.orange) }
         }
     }
@@ -309,7 +316,11 @@ struct MeetingsView: View {
                 Picker("Audio source", selection: $store.library.settings.meetingSource) {
                     ForEach(MeetingAudioSource.allCases) { Text($0.title).tag($0) }
                 }.disabled(store.busy).onChange(of: store.library.settings.meetingSource) { _, _ in store.save() }
-                Text("System audio requires Screen & System Audio Recording permission. Use headphones when capturing your microphone and system audio together.").font(.caption).foregroundStyle(.secondary)
+                MeetingPermissionsView(source: store.library.settings.meetingSource,
+                    needsSpeechRecognition: (store.library.settings.meetingLiveTranslation &&
+                        store.library.settings.meetingTranslationCaptionEngine == "apple") ||
+                        (store.library.settings.liveCaptions && store.library.settings.liveCaptionEngine == "apple"),
+                    busy: store.busy)
                 Text("The full meeting is transcribed after Stop; optional provisional captions preview recent audio during recording. Speaker labels come from provider timestamps or the optional offline speaker model. Labels are anonymous and require review, especially overlapping speech.").font(.caption).foregroundStyle(.secondary)
                 MeetingTranslationControls(service: store.meetingTranslation)
                 VStack(alignment: .leading, spacing: 8) {
@@ -333,6 +344,10 @@ struct MeetingsView: View {
                     Button("Import meeting recording…") { store.importAudio(asMeeting: true) }.disabled(store.busy)
                     Button(store.isStarting ? "Preparing audio…" : (store.isRecording ? "Finish recording" : "Record meeting")) { store.toggleRecording(asMeeting: true) }.buttonStyle(.borderedProminent).disabled(store.isStarting || store.isProcessing)
                     if store.busy { Button("Cancel") { store.cancel() } }
+                }
+                if let error = store.error {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.callout).foregroundStyle(.orange).textSelection(.enabled)
                 }
             }
             if store.isRecording && (store.library.settings.liveCaptions || store.library.settings.meetingLiveTranslation) { ProvisionalCaptionsView() }
@@ -649,6 +664,7 @@ struct ConfigurationView: View {
             Picker("Caption engine", selection: $store.library.settings.liveCaptionEngine) { Text("Local Whisper · resident model").tag("local"); Text("Apple Speech · on-device streaming").tag("apple"); Text("Selected speech provider · rolling previews").tag("provider") }.disabled(store.busy)
             Text(store.library.settings.liveCaptionEngine == "local" ? "Local Whisper uses the selected local GGML model for bounded overlapping audio windows and keeps it resident across recordings. Captions stay on this Mac; final meeting audio still uses the selected full-recording provider. Source labels do not identify speakers." : store.library.settings.liveCaptionEngine == "apple" ? "Apple Speech incrementally recognizes actual capture buffers and requests Speech Recognition permission only when you start recording. On-device support for the selected language is required; an unavailable language or denied permission produces an explicit caption error without cloud fallback. With automatic language, captions use this Mac's language; your final speech model still uses its configured detection." : "Provider previews transcribe recent microphone or selected meeting-source audio about every six seconds. Cloud providers receive extra preview requests and may charge for them. This option is rolling recognition, not incremental streaming.").font(.caption).foregroundStyle(.secondary)
             Text("After Stop, the full recording is transcribed using the speech model selected by your mode. Live captions are provisional, never pasted, and do not replace that final transcript.").font(.caption).foregroundStyle(.secondary)
+            ShortcutEditor(title: "Cancel recording", shortcut: $store.library.settings.cancelShortcut)
             ShortcutEditor(title: "Toggle recording", shortcut: $store.library.settings.toggleShortcut)
             ShortcutEditor(title: "Hold to record", shortcut: $store.library.settings.holdShortcut)
             ShortcutEditor(title: "Voice workflow", shortcut: $store.library.settings.workflowShortcut)
@@ -659,7 +675,7 @@ struct ConfigurationView: View {
                 Picker("Mouse gesture", selection: $store.library.settings.mouseRecordingBehavior) { Text("Toggle recording").tag(MouseRecordingBehavior.toggle); Text("Hold to record").tag(MouseRecordingBehavior.hold) }.disabled(store.library.settings.mouseRecordingButton == nil)
             }
             Text("Extra mouse buttons are off by default and may need macOS input-monitoring access. Keyboard and mouse holds each own only the recording they started; releasing one cannot stop another gesture's recording. Save settings to apply. The mode switcher offers Choose or explicit Record; mode-specific shortcuts remain in Modes.").font(.caption).foregroundStyle(.secondary)
-            if let conflict = HotKeySpec.validationError(toggle: store.library.settings.toggleShortcut, hold: store.library.settings.holdShortcut, modes: store.library.modes, switcher: store.library.settings.modeSwitcherShortcut) { Text(conflict).foregroundStyle(.orange) }
+            if let conflict = HotKeySpec.validationError(toggle: store.library.settings.toggleShortcut, hold: store.library.settings.holdShortcut, modes: store.library.modes, switcher: store.library.settings.modeSwitcherShortcut, workflow: store.library.settings.workflowShortcut, cancel: store.library.settings.cancelShortcut) { Text(conflict).foregroundStyle(.orange) }
             Toggle("Suggest vocabulary corrections when I explicitly edit a transcript", isOn: $store.library.settings.learnCorrections)
             Text("Learning compares only edits you save in History. Each proposed replacement requires your selection and confirmation; other apps are not monitored for corrections.").font(.caption).foregroundStyle(.secondary)
             Toggle("Use text copied within the last three seconds as context", isOn: $store.library.settings.captureRecentClipboard)

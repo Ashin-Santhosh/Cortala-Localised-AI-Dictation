@@ -57,7 +57,7 @@ import SwiftUI
     private func scheduleDismissal() {
         dismissal?.cancel()
         dismissal = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(3)) } catch { return }
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
             guard let self, !self.hovering else { return }
             self.panel?.orderOut(nil)
         }

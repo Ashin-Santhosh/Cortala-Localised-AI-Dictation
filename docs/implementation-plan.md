@@ -16,7 +16,7 @@ The unchecked acceptance rows below remain gates even when corresponding source 
 
 Build a native macOS app with independently selectable local/cloud speech recognition and optional local/cloud text processing. English is the initial quality focus; multilingual recognition and English translation remain explicit requirements. Personal use comes first; freely distributable packaging follows. Superwhisper 3.0.2 is the observed feature baseline. Wispr Flow accuracy is a measurable target, not a property established by using Whisper or adding a cleanup prompt.
 
-The user has approved an approximately 1.5 GB local Whisper model download. Reuse the installed `/opt/homebrew/bin/whisper-cli` for the first personal build; the model must be identified, downloaded completely, validated and selected in the app. Cloud inference requires the user's own endpoint and credentials; no access to proprietary S1 services or either vendor's hosted allowances is assumed. Lack of Pro access limits direct verification of gated behavior. Keep documented behavior, source implementation, runtime observation and measured accuracy distinct.
+For local transcription, select a compatible Whisper runtime and validate the downloaded model. Cloud inference requires a configured provider endpoint and credentials. Track documented behavior, source implementation, runtime observations and measured accuracy separately.
 
 The first milestone is a working daily dictation path. It is a milestone toward full parity, not a reduction of the requested scope. The current code is a scaffold: system audio is an isolated service, meetings use only microphone recording, and many parity features remain absent.
 

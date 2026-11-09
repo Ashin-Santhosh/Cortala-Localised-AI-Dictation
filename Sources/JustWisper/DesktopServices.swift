@@ -24,7 +24,7 @@ final class DesktopIntegration {
     typealias HotKey = HotKeySpec
 
     enum IntegrationError: LocalizedError {
-        case accessibilityRequired, noTarget, targetUnavailable, targetChanged, unsupportedField, eventCreationFailed
+        case accessibilityRequired, noTarget, targetUnavailable, targetChanged, unsupportedField, eventCreationFailed, clipboardWriteFailed
         var errorDescription: String? {
             switch self {
             case .accessibilityRequired: return "Enable Cortala in System Settings → Privacy & Security → Accessibility to paste into other apps. Your transcript is still available to copy."
@@ -33,6 +33,7 @@ final class DesktopIntegration {
             case .targetChanged: return "The destination text field changed while recording. Copy the transcript into the field you want to use."
             case .unsupportedField: return "Select an editable, non-password text field before recording. Your transcript is still available to copy."
             case .eventCreationFailed: return "Could not create the paste keyboard event. Copy the transcript manually."
+            case .clipboardWriteFailed: return "Could not write the transcript to the clipboard. Try copying it from History."
             }
         }
     }
@@ -46,6 +47,7 @@ final class DesktopIntegration {
     var onShowModeSwitcher: (() -> Void)?
     var onCancel: (() -> Void)?
     var onModeShortcut: ((UUID) -> Void)?
+    var cancelHotKey = HotKey.cancel
     var toggleHotKey = HotKey.toggle
     var holdHotKey = HotKey.hold
     var workflowHotKey = HotKey.workflow
@@ -56,6 +58,7 @@ final class DesktopIntegration {
     private(set) var targetBundleID: String?
     private(set) var targetSiteHost: String?
     var accessibilityTrusted: Bool { AXIsProcessTrusted() }
+    var canAutoPaste: Bool { accessibilityTrusted && CGPreflightPostEventAccess() }
 
     private var target: NSRunningApplication?
     private var targetElement: AXUIElement?
@@ -85,12 +88,13 @@ final class DesktopIntegration {
 
     @discardableResult
     func configure(settings: AppSettings, modes: [DictationMode]) -> Bool {
-        if let message = HotKeySpec.validationError(toggle: settings.toggleShortcut, hold: settings.holdShortcut, modes: modes, switcher: settings.modeSwitcherShortcut, workflow: settings.workflowShortcut) {
+        if let message = HotKeySpec.validationError(toggle: settings.toggleShortcut, hold: settings.holdShortcut, modes: modes, switcher: settings.modeSwitcherShortcut, workflow: settings.workflowShortcut, cancel: settings.cancelShortcut) {
             hotKeyError = message
             return false
         }
         guard MouseRecordingGesture.isSupported(settings.mouseRecordingButton) else { hotKeyError = "Choose the middle mouse button or a supported side button."; return false }
         stop()
+        cancelHotKey = settings.cancelShortcut
         toggleHotKey = settings.toggleShortcut
         holdHotKey = settings.holdShortcut
         workflowHotKey = settings.workflowShortcut
@@ -104,7 +108,7 @@ final class DesktopIntegration {
 
     func start() {
         stop()
-        hotKeyError = HotKeySpec.validationError(toggle: toggleHotKey, hold: holdHotKey, modes: configuredModes, switcher: switcherHotKey, workflow: workflowHotKey)
+        hotKeyError = HotKeySpec.validationError(toggle: toggleHotKey, hold: holdHotKey, modes: configuredModes, switcher: switcherHotKey, workflow: workflowHotKey, cancel: cancelHotKey)
         guard hotKeyError == nil else { return }
         var eventTypes = [EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
                           EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))]
@@ -134,11 +138,13 @@ final class DesktopIntegration {
             hotKeyError = "A shortcut is unavailable or used by another app. Choose another combination."
         }
         escapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard event.keyCode == UInt16(kVK_Escape) else { return }
-            Task { @MainActor in self?.onCancel?() }
+            guard let self, self.cancelHotKey.matches(keyCode: event.keyCode, flags: event.modifierFlags), !event.isARepeat else { return }
+            Task { @MainActor in self.onCancel?() }
         }
         localEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == UInt16(kVK_Escape) { Task { @MainActor in self?.onCancel?() } }
+            if let self, self.cancelHotKey.matches(keyCode: event.keyCode, flags: event.modifierFlags), !event.isARepeat {
+                Task { @MainActor in self.onCancel?() }
+            }
             return event
         }
         if let button = mouseGesture.button {
@@ -320,26 +326,30 @@ final class DesktopIntegration {
         return nil
     }
 
-    func copy(_ text: String) {
+    @discardableResult
+    func copy(_ text: String) -> Bool {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        let written = NSPasteboard.general.setString(text, forType: .string)
         if clipboardEnabled { clipboardTracker.reset(changeCount: NSPasteboard.general.changeCount) }
+        return written
     }
 
     func pasteSelection(_ text: String) async throws {
         try await paste(text, requireOriginalSelection: true)
     }
 
-    var hasCapturedEditableField: Bool { targetElement != nil }
-
     func paste(_ text: String, requireOriginalSelection: Bool = false) async throws {
-        guard accessibilityTrusted else { throw IntegrationError.accessibilityRequired }
+        guard canAutoPaste else { throw IntegrationError.accessibilityRequired }
         guard let destination = target else { throw IntegrationError.noTarget }
         guard var capturedElement = targetElement else { throw IntegrationError.unsupportedField }
-        guard !destination.isTerminated, destination.activate(options: []) else {
-            throw IntegrationError.targetUnavailable
+        guard !destination.isTerminated else { throw IntegrationError.targetUnavailable }
+        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if frontmost != destination.processIdentifier {
+            // Clicking Stop in Cortala may need to return focus to the captured app.
+            guard frontmost == ProcessInfo.processInfo.processIdentifier else { throw IntegrationError.targetChanged }
+            guard destination.activate(options: []) else { throw IntegrationError.targetUnavailable }
+            try await Task.sleep(for: .milliseconds(180))
         }
-        try await Task.sleep(nanoseconds: 180_000_000)
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == destination.processIdentifier else {
             throw IntegrationError.targetUnavailable
         }
@@ -359,10 +369,14 @@ final class DesktopIntegration {
         try Task.checkCancellation()
         capturedElement = try validateFocus(in: destination, capturedElement: capturedElement, allowReplacement: !requireOriginalSelection)
         if requireOriginalSelection { try validateSelection(in: capturedElement) }
-        copy(text)
+        if !copy(text) {
+            if !previous.isEmpty { pasteboard.writeObjects(previous) }
+            if clipboardEnabled { clipboardTracker.reset(changeCount: pasteboard.changeCount) }
+            throw IntegrationError.clipboardWriteFailed
+        }
         let ownedChangeCount = pasteboard.changeCount
         down.flags = .maskCommand; up.flags = .maskCommand
-        down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
+        down.postToPid(destination.processIdentifier); up.postToPid(destination.processIdentifier)
         if restoreClipboard {
             // A later copy from the user or another application owns the clipboard.
             // Never restore over it, including a concurrent JustWisper operation.
@@ -406,14 +420,12 @@ final class DesktopIntegration {
             guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
             return value
         }
-        guard !isSecure(element), let role = attribute(kAXRoleAttribute) as? String,
-              [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role),
-              attribute(kAXSubroleAttribute) as? String != kAXSecureTextFieldSubrole,
-              attribute("AXProtectedContent") as? Bool != true else { return false }
-        if let enabled = attribute(kAXEnabledAttribute) as? Bool, !enabled { return false }
         var settable: DarwinBoolean = false
         let canSetValue = AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue
-        return canSetValue || (attribute("AXEditable") as? Bool == true)
+        return PasteFieldPolicy.allows(role: attribute(kAXRoleAttribute) as? String,
+            secure: isSecure(element), enabled: attribute(kAXEnabledAttribute) as? Bool,
+            editable: attribute("AXEditable") as? Bool, valueSettable: canSetValue,
+            hasSelectionRange: selectionRange(of: element) != nil)
     }
 
     private func relatedElement(_ name: String, of element: AXUIElement) -> AXUIElement? {
@@ -441,7 +453,7 @@ final class DesktopIntegration {
     }
 
     private func validateFocus(in app: NSRunningApplication, capturedElement: AXUIElement, allowReplacement: Bool) throws -> AXUIElement {
-        guard accessibilityTrusted else { throw IntegrationError.accessibilityRequired }
+        guard canAutoPaste else { throw IntegrationError.accessibilityRequired }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier,
               let focused = focusedElement(in: app) else {
             throw IntegrationError.targetChanged

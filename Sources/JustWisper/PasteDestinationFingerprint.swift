@@ -13,3 +13,13 @@ struct PasteDestinationFingerprint: Equatable {
         sameWindow && sameParent && self == current
     }
 }
+
+/// Text editors may expose selection without allowing direct AXValue writes.
+enum PasteFieldPolicy {
+    static func allows(role: String?, secure: Bool, enabled: Bool?, editable: Bool?, valueSettable: Bool, hasSelectionRange: Bool) -> Bool {
+        guard !secure, enabled != false,
+              let role, ["AXTextField", "AXTextArea", "AXComboBox"].contains(role) else { return false }
+        if let editable { return editable }
+        return valueSettable || hasSelectionRange
+    }
+}

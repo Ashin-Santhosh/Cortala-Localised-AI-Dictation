@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import Translation
@@ -11,23 +12,43 @@ struct TranslationCaptionQueue {
     private var submitted = ""
     private var nextAllowed = Date.distantPast
     mutating func receive(_ text: String) {
-        latest = String(text.trimmingCharacters(in: .whitespacesAndNewlines).suffix(480))
-        if let boundary = latest.firstIndex(of: " "), text.count > 480 {
-            latest = String(latest[latest.index(after: boundary)...])
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Caption engines repeatedly publish their accumulated transcript.
+        // Keep context for the current sentence without retranslating earlier sentences.
+        var sentence = text[...]
+        let tail = String(text.suffix(960))
+        tail.enumerateSubstrings(in: tail.startIndex..<tail.endIndex, options: [.bySentences, .substringNotRequired]) {
+            _, range, _, _ in sentence = tail[range]
+        }
+        let bounded = sentence.suffix(480)
+        if bounded.count < sentence.count, let boundary = bounded.firstIndex(where: \.isWhitespace) {
+            latest = String(bounded[bounded.index(after: boundary)...])
+        } else {
+            latest = String(bounded)
         }
     }
-    mutating func take(now: Date) -> String? {
+    mutating func take(now: Date, minimumInterval: TimeInterval = 0.8) -> String? {
         guard !latest.isEmpty, latest != submitted, now >= nextAllowed else { return nil }
         submitted = latest
-        nextAllowed = now.addingTimeInterval(0.8)
+        nextAllowed = now.addingTimeInterval(minimumInterval)
         return latest
     }
 }
 
 @MainActor final class LiveMeetingTranslation: ObservableObject {
-    enum Engine: String, CaseIterable { case apple, languageModel
-        var title: String { self == .apple ? "Apple on-device" : "Configured language model" }
+    enum Engine: String, CaseIterable {
+        case apple, ollama, languageModel
+
+        var title: String {
+            switch self {
+            case .apple: return "Apple on-device"
+            case .ollama: return "Local Ollama · Qwen3 8B"
+            case .languageModel: return "Configured language model"
+            }
+        }
     }
+
+    static let ollamaModel = "qwen3:8b"
     @Published var engine: Engine = Engine(rawValue: UserDefaults.standard.string(forKey: "meetingTranslationEngine") ?? "apple") ?? .apple
     struct Language: Identifiable, Hashable { var id: String; var name: String }
     @Published private(set) var languages: [Language] = []
@@ -55,6 +76,13 @@ struct TranslationCaptionQueue {
         reset(); self.engine = engine
         UserDefaults.standard.set(engine.rawValue, forKey: "meetingTranslationEngine")
     }
+    func prepareOllama(source: String, target: String) throws {
+        guard let endpoint = URL(string: ProviderPreset.ollama.endpoint) else {
+            throw AppError.message("The local Ollama endpoint is unavailable.")
+        }
+        try prepareLanguageModel(source: source, target: target, endpoint: endpoint, model: Self.ollamaModel, key: "")
+    }
+
     func prepareLanguageModel(source: String, target: String, endpoint: URL, model: String, key: String,
                               translate: ((String) async throws -> String)? = nil) throws {
         reset()
@@ -102,7 +130,7 @@ struct TranslationCaptionQueue {
         captureID = UUID(); capturing = true; queue = TranslationCaptionQueue()
         original = ""; translated = ""; error = nil; lastLatency = nil
         status = "Waiting for speech…"
-        if engine == .languageModel {
+        if engine != .apple {
             guard let translate = modelTranslation else { throw AppError.message("Prepare the translation provider first.") }
             let id = UUID(); sessionID = id
             modelTask = Task {
@@ -114,7 +142,16 @@ struct TranslationCaptionQueue {
         } else if sessionID == nil { sessionID = UUID() }
     }
     func receive(_ text: String) { if capturing { queue.receive(text) } }
+    func skipCapture(reason: String) {
+        pauseCapture()
+        original = ""; translated = ""; lastLatency = nil
+        error = reason
+        status = "Live translation unavailable for this recording."
+    }
+
     func pauseCapture() {
+        // A preparation prompt can still be in progress when a meeting records without translation.
+        guard capturing else { return }
         capturing = false; captureID = UUID(); queue = TranslationCaptionQueue()
         modelTask?.cancel(); modelTask = nil; sessionID = nil
         if ready { status = "Translation ready. Captions show the most recent translated speech." }
@@ -129,7 +166,7 @@ struct TranslationCaptionQueue {
             ready = true; status = engine == .apple ? "Languages ready — translation stays on this Mac." : "Language model ready for translated captions."
             if releaseAfterPrepare { sessionID = nil; status = "Languages installed. Translation activates when the meeting starts."; return }
             while sessionID == id && !Task.isCancelled {
-                if capturing, let text = queue.take(now: Date()) {
+                if capturing, let text = queue.take(now: Date(), minimumInterval: engine == .apple ? 0.3 : 0.8) {
                     let capture = captureID
                     let started = Date()
                     let result = try await translate(text)
@@ -140,7 +177,7 @@ struct TranslationCaptionQueue {
                         status = "Live translated preview · recent speech"
                     }
                 }
-                try await Task.sleep(nanoseconds: 80_000_000)
+                try await Task.sleep(for: .milliseconds(40))
             }
         } catch {
             guard sessionID == id, !Task.isCancelled else { return }
@@ -178,8 +215,12 @@ struct MeetingTranslationHost: View {
                 let source = Locale.Language(identifier: service.source)
                 let target = Locale.Language(identifier: service.target)
                 await service.run(id: id, releaseAfterPrepare: !service.isCapturing, prepare: {
+                    let availability = LanguageAvailability()
+                    guard await availability.status(from: source, to: target) != .unsupported else {
+                        throw AppError.message("Apple translation does not support this language pair. Choose another pair or the configured language model.")
+                    }
                     try await session.prepareTranslation()
-                    guard await LanguageAvailability().status(from: source, to: target) == .installed else {
+                    guard await availability.status(from: source, to: target) == .installed else {
                         throw AppError.message("Translation languages are not installed yet. Complete the system download, then prepare the languages again.")
                     }
                 }, translate: { text in
@@ -202,12 +243,17 @@ struct MeetingTranslationControls: View {
                 Picker("Translation engine", selection: Binding(get: { service.engine }, set: { service.selectEngine($0) })) {
                     ForEach(LiveMeetingTranslation.Engine.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
+                Picker("Translation captions", selection: $store.library.settings.meetingTranslationCaptionEngine) {
+                    Text("Local Whisper").tag("local")
+                    Text("Apple Speech").tag("apple")
+                    Text("Selected speech provider").tag("provider")
+                }.onChange(of: store.library.settings.meetingTranslationCaptionEngine) { _, _ in store.save() }
                 if #available(macOS 15.0, *) {
                     HStack {
                         languagePicker("From", selection: $store.library.settings.meetingTranslationFrom)
                         Image(systemName: "arrow.right")
                         languagePicker("To", selection: $store.library.settings.meetingTranslationTo)
-                        Button("Prepare languages") {
+                        if service.engine != .ollama { Button("Prepare languages") {
                             if service.engine == .apple {
                                 service.prepare(source: store.library.settings.meetingTranslationFrom, target: store.library.settings.meetingTranslationTo)
                             } else {
@@ -219,13 +265,42 @@ struct MeetingTranslationControls: View {
                                     try service.prepareLanguageModel(source: settings.meetingTranslationFrom, target: settings.meetingTranslationTo, endpoint: endpoint, model: settings.rewriteModel, key: key)
                                 } catch { store.error = error.localizedDescription }
                             }
-                        }
+                        } }
                     }
-                    Text(service.engine == .apple ? "Apple translation uses downloaded language assets. Its active session starts with the meeting and is released after Stop." : "Uses the saved default text provider and model in Configuration. A cloud provider receives caption text; a local provider stays on this Mac. It is warmed at meeting start; no other app’s shared model is forcibly unloaded afterward.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    switch store.library.settings.meetingTranslationCaptionEngine {
+                    case "apple":
+                        Text("Apple Speech requires Speech Recognition access and on-device support for the source language.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    case "provider":
+                        Text("The selected speech provider transcribes recent audio. A cloud speech provider receives those audio previews.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    default:
+                        Text("Local Whisper transcribes speech for either translation engine. Choose its model in Models.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    switch service.engine {
+                    case .apple:
+                        Text("Apple translation uses downloaded language assets. Its session runs during the meeting.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    case .ollama:
+                        Text("Qwen3 8B runs on this Mac. Start Ollama before recording.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("Open Ollama") {
+                            if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.electron.ollama") {
+                                NSWorkspace.shared.open(app)
+                            } else {
+                                store.error = "Install Ollama and download qwen3:8b to use this translation engine."
+                            }
+                        }
+                    case .languageModel:
+                        Text("Uses the saved text provider in Configuration. A cloud text provider receives caption text.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Text("Translation processes bounded recent speech while recording. Updates can lag or revise earlier words. The original meeting transcript is saved after Stop.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Text(service.status).font(.caption).foregroundStyle(.secondary)
+                    if service.engine != .ollama || service.isCapturing || service.error != nil {
+                        Text(service.status).font(.caption).foregroundStyle(.secondary)
+                    }
                     if let error = service.error { Text(error).font(.caption).foregroundStyle(.orange) }
                 } else { Text("Live translation requires macOS 15 or later.").foregroundStyle(.orange) }
             }

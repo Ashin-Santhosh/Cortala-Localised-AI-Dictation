@@ -58,8 +58,15 @@ struct LocalWhisperAccumulator {
         }
         // A repeated window (including Stop's final decode) can contain words
         // already committed by a previous window. Never restore that prefix.
-        if let boundary = committed.last?.end {
-            incoming.removeAll { $0.end <= boundary }
+        if let last = committed.last {
+            incoming.removeAll { $0.end <= last.end }
+            // A re-decode can move the same boundary word slightly forward.
+            // A new occurrence starting at or after the boundary is genuine.
+            if let first = incoming.first, first.start < last.end - 0.08,
+               first.text.compare(last.text, options: .caseInsensitive) == .orderedSame,
+               first.end <= last.end + 0.35 {
+                incoming.removeFirst()
+            }
         }
         provisional = incoming
         windowStart = start; coveredUntil = end
@@ -206,7 +213,8 @@ final class ResidentWhisperProcess: ResidentWhisperServing, @unchecked Sendable 
             next.terminate(); throw error
         }
     }
-    func start(model: String, language: String, snapshot: @escaping () async throws -> LocalWhisperSnapshot,
+    func start(model: String, language: String, updateInterval: Duration = .milliseconds(1500),
+               snapshot: @escaping () async throws -> LocalWhisperSnapshot,
                onUpdate: @escaping (String) -> Void, onError: @escaping (String) -> Void) async throws {
         stopSession()
         try await warm(model: model, language: language)
@@ -215,7 +223,7 @@ final class ResidentWhisperProcess: ResidentWhisperServing, @unchecked Sendable 
         task = Task {
             while !Task.isCancelled && session == id {
                 do {
-                    try await Task.sleep(for: .seconds(1.5))
+                    try await Task.sleep(for: updateInterval)
                     let snapshot = try await snapshot()
                     let text = try await decode(snapshot, session: id)
                     guard !Task.isCancelled, session == id else { return }
@@ -280,6 +288,7 @@ final class ResidentWhisperProcess: ResidentWhisperServing, @unchecked Sendable 
         if let error { throw error }
         guard let pcm = output.floatChannelData else { throw ProviderError.message("No live PCM samples.") }
         var values = Array(UnsafeBufferPointer(start: pcm[0], count: Int(output.frameLength)))
+        values.withUnsafeMutableBufferPointer { QuietSpeechGain.apply(to: $0) }
         if values.count < 1600 { values += Array(repeating: 0, count: 1600 - values.count) }
         return values
     }

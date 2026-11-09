@@ -79,7 +79,7 @@ enum TranscriptionService {
         defer { try? FileManager.default.removeItem(at: directory) }
         let source = try await AudioConversion.audioSource(input: request.audioURL, directory: directory)
         let wav = directory.appendingPathComponent("input.wav")
-        let conversion = Task.detached { try AudioConversion.toWhisperWAV(input: source, output: wav) }
+        let conversion = Task.detached { try AudioConversion.toWhisperWAV(input: source, output: wav, boostQuietSpeech: request.provider == "local") }
         try await withTaskCancellationHandler(operation: { try await conversion.value }, onCancel: { conversion.cancel() })
         try Task.checkCancellation()
         let profile = SpeechProviderCapabilities.resolve(endpoint: request.endpoint, model: request.model)
@@ -198,7 +198,7 @@ enum AudioConversion {
         return output
     }
 
-    static func toWhisperWAV(input: URL, output: URL) throws {
+    static func toWhisperWAV(input: URL, output: URL, boostQuietSpeech: Bool = false) throws {
         let source: AVAudioFile
         do { source = try AVAudioFile(forReading: input) }
         catch { throw ProviderError.message("Could not open the audio file: \(error)") }
@@ -235,6 +235,9 @@ enum AudioConversion {
             if let readError { throw ProviderError.message("Could not read audio samples: \(readError)") }
             if let error { throw ProviderError.message("Sample-rate conversion failed (\(error.domain) \(error.code)): \(error.localizedDescription)") }
             if outputBuffer.frameLength > 0 {
+                if boostQuietSpeech, let samples = outputBuffer.floatChannelData?[0] {
+                    QuietSpeechGain.apply(to: .init(start: samples, count: Int(outputBuffer.frameLength)))
+                }
                 do { try destination.write(from: outputBuffer) }
                 catch { throw ProviderError.message("Could not write converted audio samples: \(error)") }
             }

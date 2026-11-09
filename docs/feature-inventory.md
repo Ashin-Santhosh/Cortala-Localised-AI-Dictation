@@ -1,14 +1,6 @@
 # JustWisper feature inventory
 
-Research date: 2026-10-21. Scope: macOS application with Superwhisper Pro behavior and a measured Wispr Flow accuracy target. User confirmed selectable cloud/local processing, primarily English with multilingual support, personal use initially and eventual free distribution. Provider budget/keys and accuracy thresholds remain open.
-
-## Evidence status
-
-All product claims below are **documented** in first-party public sources, not observed locally and not REA Evidence. No proprietary implementation or runtime behavior was recovered by this research. Checkboxes mean unverified implementation requirements, not completed functionality. The installed app version and runtime inspection must determine the final parity baseline.
-
-The parent investigation reports installed Superwhisper **3.0.2**, universal native Mach-O SHA-256 `dad044f03c3ce6dddaf14d0a3481ccb1fe9225127e0a87f5bd3cbdba875fa4d2`. Its UI observation confirms Meetings, Modes, Vocabulary, Configuration, Sound and model library, and a Message mode with tone slider, automatic language, S1-Voice/S1-Language, app/site activation and per-mode shortcut. This is parent-reported local observation, not evidence produced by this research task or REA. The user has no Pro subscription; the parent saw 2,976 trial words remaining. REA doctor was blocked by a developer-toolchain problem, so no REA Evidence IDs exist.
-
-Version discrepancy: indexed changelog material includes 2.18.x, but installed 3.0.2 aligns with current Meetings documentation. The marketing model table labels some Whisper models Pro while current plan documentation says all local Whisper models are free. Use installed 3.0.2 for exact UI parity and current plan docs for tier intent.
+Research date: 2026-10-21. This historical checklist covers macOS dictation features and possible accuracy benchmarks. The requirements are based on public vendor documentation. See [feature status](feature-status.md) for implementation and verification progress.
 
 ## Superwhisper checklist
 
@@ -63,10 +55,5 @@ Proposed release gate to confirm with the owner: no critical meaning changes on 
 
 ## Remaining investigation
 
-- [x] Parent resolved installed Superwhisper 3.0.2 and exact executable identity; full runtime behavior coverage remains open.
-- [ ] Verify each requirement against that build and record REA Evidence separately if analysis tools become available.
-- [x] User confirmed English plus multilingual, selectable cloud/local, personal use then potential free distribution.
-- [ ] Confirm provider budget/keys and minimum macOS version.
-- [x] Include 3.0 meetings in parity because the installed build is 3.0.2.
-- [ ] Obtain and evaluate a representative voice corpus before claiming Flow-level accuracy.
-- [ ] Replace this research checklist with implementation/test statuses only when those outcomes actually exist.
+- [ ] Verify relevant behavior on supported versions of macOS.
+- [ ] Evaluate a representative voice corpus before making comparative accuracy claims.

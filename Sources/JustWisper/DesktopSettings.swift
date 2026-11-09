@@ -8,13 +8,14 @@ struct HotKeySpec: Codable, Equatable, Hashable {
     var keyCode: UInt32
     var modifiers: UInt32
 
+    static let cancel = HotKeySpec(keyCode: UInt32(kVK_Escape), modifiers: UInt32(controlKey))
     static let toggle = HotKeySpec(keyCode: UInt32(kVK_Space), modifiers: UInt32(controlKey | optionKey))
     static let hold = HotKeySpec(keyCode: UInt32(kVK_Space), modifiers: UInt32(controlKey | optionKey | shiftKey))
     static let workflow = HotKeySpec(keyCode: UInt32(kVK_Space), modifiers: UInt32(controlKey | shiftKey))
     static let modeSwitcher = HotKeySpec(keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(controlKey | optionKey))
     static let supportedModifiers = UInt32(cmdKey | controlKey | optionKey | shiftKey)
     static let keyChoices: [(name: String, code: UInt32)] = [
-        ("Space", 49), ("Return", 36), ("Tab", 48),
+        ("Escape", 53), ("Space", 49), ("Return", 36), ("Tab", 48),
         ("A", 0), ("B", 11), ("C", 8), ("D", 2), ("E", 14), ("F", 3), ("G", 5), ("H", 4),
         ("I", 34), ("J", 38), ("K", 40), ("L", 37), ("M", 46), ("N", 45), ("O", 31), ("P", 35),
         ("Q", 12), ("R", 15), ("S", 1), ("T", 17), ("U", 32), ("V", 9), ("W", 13), ("X", 7), ("Y", 16), ("Z", 6),
@@ -26,13 +27,21 @@ struct HotKeySpec: Codable, Equatable, Hashable {
         Self.keyChoices.contains { $0.code == keyCode } && modifiers & ~Self.supportedModifiers == 0 &&
         modifiers & UInt32(cmdKey | controlKey | optionKey) != 0
     }
+    func matches(keyCode: UInt16, flags: NSEvent.ModifierFlags) -> Bool {
+        var carbon: UInt32 = 0
+        for (flag, value) in [(NSEvent.ModifierFlags.control, controlKey), (.option, optionKey), (.shift, shiftKey), (.command, cmdKey)] {
+            if flags.contains(flag) { carbon |= UInt32(value) }
+        }
+        return UInt32(keyCode) == self.keyCode && carbon == modifiers
+    }
+
     var displayName: String {
         let prefix = [(controlKey, "⌃"), (optionKey, "⌥"), (shiftKey, "⇧"), (cmdKey, "⌘")]
             .filter { modifiers & UInt32($0.0) != 0 }.map(\.1).joined()
         return prefix + (Self.keyChoices.first { $0.code == keyCode }?.name ?? "Key \(keyCode)")
     }
-    static func validationError(toggle: Self, hold: Self, modes: [DictationMode], switcher: Self? = nil, workflow: Self = .workflow) -> String? {
-        let assignments = [("Toggle recording", toggle), ("Hold to record", hold), ("Voice workflow", workflow)] + (switcher.map { [("Mode switcher", $0)] } ?? []) + modes.compactMap { mode in mode.shortcut.map { (mode.name, $0) } }
+    static func validationError(toggle: Self, hold: Self, modes: [DictationMode], switcher: Self? = nil, workflow: Self = .workflow, cancel: Self = .cancel) -> String? {
+        let assignments = [("Cancel recording", cancel), ("Toggle recording", toggle), ("Hold to record", hold), ("Voice workflow", workflow)] + (switcher.map { [("Mode switcher", $0)] } ?? []) + modes.compactMap { mode in mode.shortcut.map { (mode.name, $0) } }
         var seen: [Self: String] = [:]
         for (name, key) in assignments {
             guard key.isValid else { return "\(name): choose a supported key with Control, Option, or Command." }

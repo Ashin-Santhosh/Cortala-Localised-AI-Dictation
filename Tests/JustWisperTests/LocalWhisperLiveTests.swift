@@ -28,6 +28,29 @@ struct LocalWhisperLiveTests {
         #expect(try accumulator.finalText(at: 4) == "go go now")
     }
 
+    @Test func timestampDriftDoesNotRestoreCommittedBoundaryWord() {
+        var accumulator = LocalWhisperAccumulator()
+        accumulator.update([.init(start: 0.4, end: 1, text: "heute")], start: 0, end: 3)
+        accumulator.update([.init(start: 0, end: 0.5, text: "geht")], start: 1, end: 4)
+        accumulator.update([
+            .init(start: 0, end: 0.35, text: "heute"),
+            .init(start: 0.35, end: 0.75, text: "geht")
+        ], start: 0.9, end: 4)
+        #expect(accumulator.text == "heute geht")
+    }
+
+    @Test func quietSpeechGainIsBoundedAndLeavesSilenceAndLoudAudioAlone() {
+        var quiet: [Float] = [0, 0.01, -0.02]
+        var silence: [Float] = [0, 0, 0]
+        var loud: [Float] = [0, 0.7, -0.9]
+        quiet.withUnsafeMutableBufferPointer { QuietSpeechGain.apply(to: $0) }
+        silence.withUnsafeMutableBufferPointer { QuietSpeechGain.apply(to: $0) }
+        loud.withUnsafeMutableBufferPointer { QuietSpeechGain.apply(to: $0) }
+        #expect(quiet == [0, 0.04, -0.08])
+        #expect(silence == [0, 0, 0])
+        #expect(loud == [0, 0.7, -0.9])
+    }
+
     @Test func overlappingWindowsReplaceHypothesesAndNeverRepeatWholeWindows() throws {
         var accumulator = LocalWhisperAccumulator()
         accumulator.update([.init(start: 0, end: 1, text: "hello"), .init(start: 1, end: 2, text: "wrong")], start: 0, end: 3)

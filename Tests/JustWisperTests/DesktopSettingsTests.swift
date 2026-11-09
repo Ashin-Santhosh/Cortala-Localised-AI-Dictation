@@ -8,12 +8,24 @@ struct DesktopSettingsTests {
         #expect(HotKeySpec.toggle.isValid)
         #expect(HotKeySpec.hold.isValid)
         #expect(!HotKeySpec(keyCode: 49, modifiers: 0).isValid)
-        #expect(!HotKeySpec(keyCode: 53, modifiers: UInt32(optionKey)).isValid)
+        #expect(HotKeySpec(keyCode: 53, modifiers: UInt32(optionKey)).isValid)
         #expect(!HotKeySpec(keyCode: 49, modifiers: UInt32(optionKey) | 1).isValid)
         var mode = DictationMode(name: "Email")
         mode.shortcut = .toggle
         #expect(HotKeySpec.validationError(toggle: .toggle, hold: .hold, modes: [mode])?.contains("same shortcut") == true)
         #expect(HotKeySpec.validationError(toggle: .toggle, hold: .hold, modes: []) == nil)
+    }
+
+    @Test func cancelShortcutMatchesExactModifiersAndPersists() throws {
+        #expect(!HotKeySpec.cancel.matches(keyCode: 53, flags: []))
+        #expect(HotKeySpec.cancel.matches(keyCode: 53, flags: [.control]))
+        #expect(!HotKeySpec.cancel.matches(keyCode: 53, flags: [.control, .shift]))
+        #expect(HotKeySpec.validationError(toggle: .toggle, hold: .hold, modes: [], cancel: .toggle) != nil)
+        var settings = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
+        #expect(settings.cancelShortcut == .cancel)
+        settings.cancelShortcut = HotKeySpec(keyCode: 53, modifiers: UInt32(optionKey))
+        let restored = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+        #expect(restored.cancelShortcut == settings.cancelShortcut)
     }
 
     @Test func oldLibraryAndModeDecodeWithContextCaptureDisabled() throws {

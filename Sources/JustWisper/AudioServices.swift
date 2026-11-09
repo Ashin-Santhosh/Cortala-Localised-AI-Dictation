@@ -191,7 +191,9 @@ final class SystemAudioRecorderService: ObservableObject {
 
     func start() async throws {
         guard !isRecording else { return }
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content: SCShareableContent
+        do { content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) }
+        catch { throw captureError(error) }
         guard let display = content.displays.first else { throw ProviderError.message("No display is available for system audio capture.") }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("JustWisper", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -208,13 +210,26 @@ final class SystemAudioRecorderService: ObservableObject {
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         let capture = SCStream(filter: filter, configuration: configuration, delegate: output)
-        try capture.addStreamOutput(output, type: .audio, sampleHandlerQueue: queue)
-        do { try await capture.startCapture() }
-        catch { output.cancel(); try? FileManager.default.removeItem(at: url); throw error }
+        do {
+            try capture.addStreamOutput(output, type: .audio, sampleHandlerQueue: queue)
+            try await capture.startCapture()
+        } catch {
+            output.cancel()
+            try? FileManager.default.removeItem(at: url)
+            throw captureError(error)
+        }
         sink = output
         stream = capture
         outputURL = url
         isRecording = true
+    }
+
+    private func captureError(_ error: Error) -> Error {
+        let issue = error as NSError
+        if issue.domain == SCStreamErrorDomain, issue.code == SCStreamError.Code.userDeclined.rawValue {
+            return ProviderError.message("System audio access was denied. In Meetings, open Screen & System Audio Recording settings to allow Cortala, or select Microphone as the audio source.")
+        }
+        return error
     }
 
     func snapshot() throws -> URL {

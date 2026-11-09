@@ -110,6 +110,7 @@ final class StreamingSpeechService {
         var disabled = false
         var reportedNoSpeech = false
         var technicalFailure = false
+        var receivedAudio = false
         init(recognizer: SFSpeechRecognizer) { self.recognizer = recognizer }
     }
     private var sessions: [StreamingSpeechSource: Session] = [:]
@@ -127,14 +128,6 @@ final class StreamingSpeechService {
     func start(language: String, vocabulary: [String], sources: [StreamingSpeechSource], retainFullTranscript: Bool = false,
                onUpdate: @escaping (String) -> Void, onError: @escaping (String) -> Void) async throws {
         stop()
-        let locale = try Self.supportedOnDeviceLocale(language: language)
-        var next: [StreamingSpeechSource: Session] = [:]
-        for source in sources {
-            guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.supportsOnDeviceRecognition else {
-                throw ProviderError.message("Apple on-device live captions are unavailable for \(locale.identifier). Choose selected-provider previews explicitly if desired.")
-            }
-            next[source] = Session(recognizer: recognizer)
-        }
         let authorization: SFSpeechRecognizerAuthorizationStatus
         if SFSpeechRecognizer.authorizationStatus() == .notDetermined {
             authorization = await withCheckedContinuation { continuation in
@@ -143,7 +136,15 @@ final class StreamingSpeechService {
         } else { authorization = SFSpeechRecognizer.authorizationStatus() }
         try Task.checkCancellation()
         guard authorization == .authorized else {
-            throw ProviderError.message("Speech Recognition permission is required for Apple live captions. Enable it for Cortala in System Settings, or choose selected-provider previews explicitly. The final recording can still use your configured speech model.")
+            throw ProviderError.message("Apple Speech requires Speech Recognition permission. Enable it for Cortala in System Settings → Privacy & Security → Speech Recognition.")
+        }
+        let locale = try Self.supportedOnDeviceLocale(language: language)
+        var next: [StreamingSpeechSource: Session] = [:]
+        for source in sources {
+            guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.supportsOnDeviceRecognition else {
+                throw ProviderError.message("Apple on-device speech is unavailable for \(locale.identifier). Choose a supported language or Local Whisper.")
+            }
+            next[source] = Session(recognizer: recognizer)
         }
         self.vocabulary = Array(vocabulary.filter { !$0.isEmpty }.prefix(100))
         sessions = next; accumulator = StreamingTranscriptAccumulator(retainFullTranscript: retainFullTranscript)
@@ -178,7 +179,10 @@ final class StreamingSpeechService {
     private func consume(_ buffer: AVAudioPCMBuffer, source: StreamingSpeechSource) {
         guard active, !finishing, let session = sessions[source], !session.disabled else { return }
         if session.request == nil { beginUtterance(session, source: source) }
-        session.request?.append(buffer)
+        if let request = session.request {
+            request.append(buffer)
+            session.receivedAudio = true
+        }
     }
 
     private func beginUtterance(_ session: Session, source: StreamingSpeechSource) {
@@ -246,7 +250,7 @@ final class StreamingSpeechService {
             guard active, runID == id else { throw CancellationError() }
             let state = StreamingFinalizationState.evaluate(accumulator,
                 pendingRequests: sessions.values.filter { $0.request != nil }.count,
-                failed: sessions.values.contains { $0.disabled })
+                failed: sessions.values.contains { $0.technicalFailure || !$0.receivedAudio || $0.disabled })
             switch state {
             case .ready: return accumulator.rendered(labelSources: labelSources)
             case .empty: throw NoSpeechDetected()

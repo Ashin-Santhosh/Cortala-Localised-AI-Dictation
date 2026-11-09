@@ -64,7 +64,7 @@ struct HelpTutorialView: View {
                 HStack { Label("A quick start", systemImage: "book.closed").font(.title2.weight(.semibold)); Spacer(); Button("Show welcome guide") { store.showingWelcome = true } }
                 Text("1. Choose a mode in Home. For plain text with the shortest delay, use Dictation.")
                 Text("2. Use \(store.library.settings.toggleShortcut.displayName) to start and stop. Hold mode uses \(store.library.settings.holdShortcut.displayName).")
-                Text("3. Focus the destination field before Stop. Keep it unchanged until insertion. Without an editable destination, use the copy icon in the result overlay; hovering pauses its three-second dismissal. History keeps the transcript too.")
+                Text("3. Focus the destination field before Stop and keep it unchanged until insertion. The result preview stays on screen for five seconds. Hover to keep it open, or use the Copy button. History keeps the transcript too.")
             }
             SetupPermissionsView()
             PrivacySetupView()
@@ -107,7 +107,7 @@ struct SetupPermissionsView: View {
             Label("Permissions · grant only what you use", systemImage: "checklist").font(.headline)
             permission("Microphone", detail: "Needed to record your voice.", allowed: microphone, destination: "Microphone")
             permission("Accessibility", detail: "Optional: insert text into other apps.", allowed: accessibility, destination: "Accessibility")
-            permission("Speech Recognition", detail: "Needed for Fast and Apple live captions.", allowed: speech, destination: "SpeechRecognition")
+            permission("Speech Recognition", detail: "Needed for the Apple Speech engine.", allowed: speech, destination: "SpeechRecognition")
             permission("Screen & System Audio Recording", detail: "Needed only to capture sound from other apps.", allowed: screen, destination: "ScreenCapture")
             Text("These buttons open macOS settings. You approve each permission yourself; no permission is enabled automatically.").font(.caption).foregroundStyle(.secondary)
         }.task { refresh() }.onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in refresh() }
@@ -122,9 +122,108 @@ struct SetupPermissionsView: View {
     }
     private func refresh() {
         microphone = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        accessibility = AXIsProcessTrusted()
+        accessibility = AXIsProcessTrusted() && CGPreflightPostEventAccess()
         speech = SFSpeechRecognizer.authorizationStatus() == .authorized
         screen = CGPreflightScreenCaptureAccess()
+    }
+}
+
+struct MeetingPermissionsView: View {
+    let source: MeetingAudioSource
+    let needsSpeechRecognition: Bool
+    let busy: Bool
+
+    @State private var microphone = AVCaptureDevice.authorizationStatus(for: .audio)
+    @State private var speech = SFSpeechRecognizer.authorizationStatus()
+    @State private var screen = CGPreflightScreenCaptureAccess()
+    @State private var requesting = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Permissions for this meeting").font(.headline)
+            if source != .system {
+                permission("Microphone", status: microphoneStatus, allowed: microphone == .authorized,
+                           destination: "Microphone", request: microphone == .notDetermined ? requestMicrophone : nil)
+            }
+            if source != .microphone {
+                permission("Screen & System Audio Recording", status: screen ? "Allowed" : "Screen access not enabled",
+                           allowed: screen, destination: "ScreenCapture", request: screen ? nil : requestScreen)
+            }
+            if needsSpeechRecognition {
+                permission("Speech Recognition", status: speechStatus, allowed: speech == .authorized,
+                           destination: "SpeechRecognition", request: speech == .notDetermined ? requestSpeech : nil)
+                Text("Apple live captions need Speech Recognition. Meeting audio can still be recorded without it.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .task { refresh() }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in refresh() }
+    }
+
+    private var microphoneStatus: String {
+        switch microphone {
+        case .authorized: return "Allowed"
+        case .notDetermined: return "Not requested"
+        case .restricted: return "Restricted"
+        default: return "Not allowed"
+        }
+    }
+
+    private var speechStatus: String {
+        switch speech {
+        case .authorized: return "Allowed"
+        case .notDetermined: return "Not requested"
+        case .restricted: return "Restricted"
+        default: return "Not allowed"
+        }
+    }
+
+    private func permission(_ title: String, status: String, allowed: Bool, destination: String,
+                            request: (() -> Void)?) -> some View {
+        HStack {
+            Label(title, systemImage: allowed ? "checkmark.circle.fill" : "exclamationmark.circle")
+            Text(status).font(.caption).foregroundStyle(allowed ? Color.secondary : Color.orange)
+            Spacer()
+            if let request {
+                Button("Request access", action: request)
+                    .accessibilityLabel("Request \(title) access")
+                    .disabled(busy || requesting)
+            }
+            if !allowed {
+                Button("Open Settings") { SetupDestination.open(destination) }
+                    .accessibilityLabel("Open \(title) settings")
+            }
+        }
+    }
+
+    private func refresh() {
+        microphone = AVCaptureDevice.authorizationStatus(for: .audio)
+        speech = SFSpeechRecognizer.authorizationStatus()
+        screen = CGPreflightScreenCaptureAccess()
+    }
+
+    private func requestMicrophone() {
+        requesting = true
+        Task {
+            _ = await AVCaptureDevice.requestAccess(for: .audio)
+            refresh()
+            requesting = false
+        }
+    }
+
+    private func requestSpeech() {
+        requesting = true
+        SFSpeechRecognizer.requestAuthorization { _ in
+            Task { @MainActor in
+                refresh()
+                requesting = false
+            }
+        }
+    }
+
+    private func requestScreen() {
+        if !CGRequestScreenCaptureAccess() { SetupDestination.open("ScreenCapture") }
+        refresh()
     }
 }
 
